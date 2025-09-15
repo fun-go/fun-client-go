@@ -1,8 +1,14 @@
 package fun
 
 import (
+	"fmt"
+	"io/ioutil"
+	"os"
 	"sync"
 	"time"
+
+	"github.com/gorilla/websocket"
+	gonanoid "github.com/matoous/go-nanoid/v2"
 )
 
 // Result 定义结果结构体
@@ -21,13 +27,15 @@ const (
 	cellErrorCode
 	errorCode
 	closeErrorCode
+	networkError
+	timeoutErro
 )
 
 type Result[T any] struct {
 	Id     string
 	Code   *uint16
-	Data   *T
-	Msg    *string
+	Data   T
+	Msg    string
 	Status uint8
 }
 
@@ -61,6 +69,8 @@ type Client struct {
 	openCall    []func()
 	closeCall   []func()
 	mutex       sync.Mutex
+	client      *websocket.Conn
+	timer       *time.Timer
 }
 
 type status int
@@ -85,16 +95,54 @@ func NewClient(url string) *Client {
 	return client
 }
 
+
+
 // 模拟初始化连接
 func (c *Client) initConnection(url string) {
 	// 模拟连接过程
-	time.Sleep(100 * time.Millisecond)
+	url = fmt.Sprintf("%s?id=%s", url, getId())
+	conn, _, err := websocket.DefaultDialer.Dial(url, nil)
+	for err != nil {
+		time.Sleep(5 * time.Second)
+		conn, _, err = websocket.DefaultDialer.Dial(url, nil)
+	}
+	c.client =  conn
+	go func() {
+		for {
+			writeMutex.Lock() // 加锁
+			err = conn.WriteMessage(websocket.BinaryMessage, []byte{0})
+			writeMutex.Unlock()
+			time.Sleep(5 * time.Second)
+		}
+	}()
+	go func() {
+		for {
+			messageType, message, _ := conn.ReadMessage()
+			if messageType == websocket.TextMessage {
+				testMessageQueue <- message
+			}
+			if messageType == websocket.BinaryMessage {
+				//处理客户端ping信息 回复
+				if len(*message) == 1 && (*message)[0] == 1 {
+					c.timer.Stop()
+				}
+				return
+			}
+		}
+	}()
 	c.status = susses
 
 	// 触发打开回调
 	for _, callback := range c.openCall {
 		callback()
 	}
+}
+
+func (c *Client) ping(){
+	err := c.client.WriteMessage(websocket.BinaryMessage, []byte{0})
+	c.timer = time.AfterFunc(2*time.Second, func() {
+	})
+
 }
 
 // OnFormer 设置请求前回调
@@ -138,4 +186,47 @@ func request[T]() Result[T]  {
 
 func Proxy[T]() func  {
 
+}
+
+func getId() string {
+    const idFile = "client_id.txt"
+    var id string
+    if data, err := os.ReadFile(idFile); err == nil && len(data) > 0 {
+        id = string(data)
+    } else {
+        id, _ = gonanoid.New()
+        os.WriteFile(idFile, []byte(id), 0644)
+    }
+    return id
+}
+
+func (c *Client) networkError(serviceName, methodName string) Result[any] {
+	return c.after(serviceName, methodName, Result[any]{
+		Id:     "",
+		Msg:    "fun: Network anomaly",
+		Status: networkError,
+		Data:   nil,
+	})
+}
+
+// timeoutError 创建超时错误结果
+func (c *Client) timeoutError(serviceName, methodName string) Result[any] {
+	return c.after(serviceName, methodName, Result[any]{
+		Id:     "",
+		Msg:    "fun: Network timeout",
+		Status: timeoutErro,
+		Data:   nil,
+	})
+}
+
+func (c *Client) after(serviceName, methodName string, result Result[any]) Result[any] {
+	// 如果设置了 afterCall 回调，则调用它并返回处理后的结果
+	if c.afterCall != nil {
+		processedResult := c.afterCall(serviceName, methodName, result)
+		// 转换回具体类型
+		return processedResult
+	}
+
+	// 否则直接返回原始结果
+	return result
 }
