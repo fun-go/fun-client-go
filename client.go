@@ -1,6 +1,5 @@
 package client
 
-import "C"
 import (
 	"encoding/json"
 	"fmt"
@@ -55,7 +54,7 @@ type RequestInfo struct {
 	State       map[string]string
 	Type        RequestType
 	Chan        chan Result[any]
-	on          *On[any]
+	on          On[any]
 }
 
 type Void struct{}
@@ -159,7 +158,7 @@ func (c *Client) initConnection(url string) {
 			result := networkError[any](c, request.ServiceName, request.MethodName)
 			request.Chan <- result
 		} else {
-			if request.on != nil && request.on.Close != nil {
+			if request.on.Close != nil {
 				request.on.Close()
 			}
 		}
@@ -190,7 +189,6 @@ func (c *Client) handleMessage(result Result[any]) {
 		} else {
 			result := c.after(request.ServiceName, request.MethodName, result)
 			request.Chan <- result
-			c.requestList.Delete(result.Id)
 		}
 	}
 }
@@ -342,7 +340,7 @@ func Proxy[T any](client *Client, serviceName string, methodName string, dto any
 	}
 
 	// 创建 On[any] 类型的包装
-	onAny := &On[any]{
+	onAny := On[any]{
 		Message: func(message any) {
 			// 类型断言转换为 T 类型
 			convertedData := safeConvert[T](message)
