@@ -1,4 +1,4 @@
-module client
+module github.com/fun-go/fun-client-go
 
 go 1.23.3
 
