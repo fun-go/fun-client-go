@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"context"
+
 	"github.com/gorilla/websocket"
 	gonanoid "github.com/matoous/go-nanoid/v2"
 )
@@ -216,12 +217,7 @@ func (c *Client) removeRequest(id string) {
 }
 
 func request[T any](serviceName string, methodName string, dto any) Result[T] {
-	return Result[T]{
-		Id:     "",
-		Msg:    "fun: Network anomaly",
-		Status: NetworkError,
-		Data:   Void{},
-	}
+	return Result[T]{}
 }
 
 func Proxy[T any](serviceName string, methodName string, dto any, on *On[T]) func() {
