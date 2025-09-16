@@ -109,8 +109,10 @@ func (c *Client) initConnection(url string) {
 		time.Sleep(5 * time.Second)
 		conn, _, err = websocket.DefaultDialer.Dial(url, nil)
 	}
+	c.mutex.Lock()
 	c.client = conn
 	c.status = sussesStatus
+	c.mutex.Unlock()
 	// 启动 ping 机制
 	ctx, cancelFunc := context.WithCancel(context.Background())
 	c.ping(ctx)
@@ -121,7 +123,9 @@ func (c *Client) initConnection(url string) {
 	c.requestList.Range(func(key, value interface{}) bool {
 		request := value.(RequestInfo)
 		if c.status == sussesStatus || conn != nil {
+			c.mutex.Lock()
 			c.client.WriteJSON(request)
+			c.mutex.Unlock()
 		}
 		return true
 	})
