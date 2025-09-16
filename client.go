@@ -1,6 +1,8 @@
 package client
 
+import "C"
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"sync"
@@ -12,8 +14,6 @@ import (
 	gonanoid "github.com/matoous/go-nanoid/v2"
 )
 
-// Result 定义结果结构体
-// RequestType 定义请求类型枚举
 type RequestType uint8
 
 const (
@@ -51,7 +51,7 @@ type RequestInfo struct {
 	Id          string
 	MethodName  string
 	ServiceName string
-	Dto         *any
+	Dto         any
 	State       map[string]string
 	Type        RequestType
 	function    *func(data Result[any])
@@ -63,7 +63,7 @@ type Void struct{}
 // Client 定义客户端结构体
 type Client struct {
 	status      status
-	requestList []RequestInfo
+	requestList sync.Map // 使用线程安全的map
 	formerCall  func(serviceName, methodName string, state map[string]string)
 	afterCall   func(serviceName, methodName string, result Result[any]) Result[any]
 	openCall    []func()
@@ -84,7 +84,7 @@ const (
 func NewClient(url string) (*Client, error) {
 	client := &Client{
 		status:      closeStatus,
-		requestList: make([]RequestInfo, 0),
+		requestList: sync.Map{},
 		openCall:    make([]func(), 0),
 		closeCall:   make([]func(), 0),
 		mutex:       &sync.Mutex{},
@@ -95,22 +95,26 @@ func NewClient(url string) (*Client, error) {
 	}
 	url = fmt.Sprintf("%s?id=%s", url, id)
 	// 模拟连接初始化
+	var wg sync.WaitGroup
+	wg.Add(1)
 	go func() {
 		for {
-			client.initConnection(url)
+			client.initConnection(url, &wg)
 		}
 	}()
+	wg.Wait()
 	return client, nil
 }
 
 // 模拟初始化连接
-func (c *Client) initConnection(url string) {
+func (c *Client) initConnection(url string, wg *sync.WaitGroup) {
 	// 模拟连接过程
 	conn, _, err := websocket.DefaultDialer.Dial(url, nil)
 	for err != nil {
 		time.Sleep(5 * time.Second)
 		conn, _, err = websocket.DefaultDialer.Dial(url, nil)
 	}
+	wg.Done()
 	c.client = conn
 	c.status = sussesStatus
 	// 启动 ping 机制
@@ -120,11 +124,13 @@ func (c *Client) initConnection(url string) {
 	for _, callback := range c.openCall {
 		callback()
 	}
-	for _, request := range c.requestList {
-		c.mutex.Lock()
-		c.client.WriteJSON(request)
-		c.mutex.Unlock()
-	}
+	c.requestList.Range(func(key, value interface{}) bool {
+		request := value.(RequestInfo)
+		if c.status == sussesStatus || conn != nil {
+			c.client.WriteJSON(request)
+		}
+		return true
+	})
 	// 消息处理循环
 	for {
 		messageType, message, err := conn.ReadMessage()
@@ -133,22 +139,27 @@ func (c *Client) initConnection(url string) {
 		}
 
 		if messageType == websocket.TextMessage {
-			// 处理文本消息
-			// testMessageQueue <- message (需要定义 testMessageQueue)
+			var result Result[any]
+			if err := json.Unmarshal(message, &result); err == nil {
+				c.handleMessage(result)
+			}
 		}
 
 		if messageType == websocket.BinaryMessage {
 			if len(message) == 1 && message[0] == 1 {
+				c.mutex.Lock()
 				if c.timer != nil {
 					c.timer.Stop()
 				}
+				c.mutex.Unlock()
 			}
 		}
 	}
+	c.mutex.Lock()
 	c.status = closeStatus
 	cancelFunc()
-	c.mutex.Lock()
-	for _, request := range c.requestList {
+	c.requestList.Range(func(key, value interface{}) bool {
+		request := value.(RequestInfo)
 		if request.Type == funcType {
 			if request.function != nil {
 				result := networkError[any](c, request.ServiceName, request.MethodName)
@@ -159,11 +170,34 @@ func (c *Client) initConnection(url string) {
 				request.on.Close()
 			}
 		}
-	}
-	c.requestList = make([]RequestInfo, 0)
-	c.mutex.Unlock()
+		return true
+	})
+	c.requestList = sync.Map{} // 重置sync.Map
 	for _, closeCall := range c.closeCall {
 		closeCall()
+	}
+	c.mutex.Unlock()
+}
+
+func (c *Client) handleMessage(result Result[any]) {
+	// 使用sync.Map优化查找性能
+	if value, exists := c.requestList.Load(result.Id); exists {
+		request := value.(RequestInfo)
+		if request.Type == proxyType {
+			if result.Status == SuccessCode {
+				if request.on.Message != nil {
+					request.on.Message(result.Data)
+				}
+			} else {
+				if request.on.Close != nil {
+					request.on.Close()
+				}
+				c.requestList.Delete(result.Id)
+			}
+		} else {
+			(*request.function)(result)
+			c.requestList.Delete(result.Id)
+		}
 	}
 }
 
@@ -176,14 +210,20 @@ func (c *Client) ping(ctx context.Context) {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				c.client.WriteMessage(websocket.BinaryMessage, []byte{0})
+				c.mutex.Lock()
+				if c.status == sussesStatus || c.client != nil {
+					c.client.WriteMessage(websocket.BinaryMessage, []byte{0})
+				}
 				if c.timer != nil {
 					c.timer.Reset(2 * time.Second)
 				} else {
 					c.timer = time.AfterFunc(2*time.Second, func() {
-						c.client.Close()
+						if c.status == sussesStatus || c.client != nil {
+							c.client.Close()
+						}
 					})
 				}
+				c.mutex.Unlock()
 			}
 		}
 	}()
@@ -219,28 +259,12 @@ func (c *Client) OnOpen(fn func()) {
 
 // removeRequest 从请求列表中删除指定ID的请求
 func (c *Client) removeRequest(id string) {
-	c.mutex.Lock()
-	defer c.mutex.Unlock()
-
-	filtered := make([]RequestInfo, 0)
-	for _, request := range c.requestList {
-		if request.Id != id {
-			filtered = append(filtered, request)
-		}
-	}
-	c.requestList = filtered
+	c.requestList.Delete(id)
 }
 
 func (c *Client) isRequestId(id string) bool {
-	c.mutex.Lock()
-	defer c.mutex.Unlock()
-
-	for _, requestInfo := range c.requestList {
-		if requestInfo.Id == id {
-			return true
-		}
-	}
-	return false
+	_, exists := c.requestList.Load(id)
+	return exists
 }
 
 func Request[T any](client *Client, serviceName string, methodName string, dto ...any) Result[T] {
@@ -266,24 +290,27 @@ func Request[T any](client *Client, serviceName string, methodName string, dto .
 			if client.afterCall != nil {
 				data = client.afterCall(serviceName, methodName, data)
 			}
+			convertedData := SafeConvert[T](data.Data)
 			result = Result[T]{
 				Id:     data.Id,
 				Code:   data.Code,
-				Data:   data.Data.(T),
+				Data:   convertedData,
 				Msg:    data.Msg,
 				Status: data.Status,
 			}
+			resultChan <- result
 		}
 	}
 	requestInfo.function = &function
 	if client.status != closeStatus {
 		client.mutex.Lock()
-		client.client.WriteJSON(requestInfo)
+		if client.status == sussesStatus || client.client != nil {
+			client.client.WriteJSON(requestInfo)
+		}
 		client.mutex.Unlock()
 	}
-	client.mutex.Lock()
-	client.requestList = append(client.requestList, requestInfo)
-	client.mutex.Unlock()
+	// 使用sync.Map的Store操作
+	client.requestList.Store(requestInfo.Id, requestInfo)
 
 	networkTimeout := time.After(2 * time.Second)
 	timeout := time.After(10 * time.Second)
@@ -331,9 +358,8 @@ func Proxy[T any](client *Client, serviceName string, methodName string, dto any
 	onAny := &On[any]{
 		Message: func(message any) {
 			// 类型断言转换为 T 类型
-			if msg, ok := message.(T); ok {
-				on.Message(msg)
-			}
+			convertedData := SafeConvert[T](message)
+			on.Message(convertedData)
 		},
 		Close: on.Close,
 	}
@@ -342,14 +368,15 @@ func Proxy[T any](client *Client, serviceName string, methodName string, dto any
 	// 如果客户端已连接，则发送请求
 	if client.status != closeStatus {
 		client.mutex.Lock()
-		client.client.WriteJSON(requestInfo)
+		if client.status == sussesStatus || client.client != nil {
+			client.client.WriteJSON(requestInfo)
+		}
 		client.mutex.Unlock()
 	}
 
 	// 将请求添加到请求列表中
-	client.mutex.Lock()
-	client.requestList = append(client.requestList, requestInfo)
-	client.mutex.Unlock()
+	// 使用sync.Map的Store操作
+	client.requestList.Store(requestInfo.Id, requestInfo)
 
 	// 返回一个用于关闭连接的函数
 	return func() {
@@ -360,11 +387,16 @@ func Proxy[T any](client *Client, serviceName string, methodName string, dto any
 			ServiceName: serviceName,
 			MethodName:  methodName,
 		}
-
+		state = make(map[string]string)
+		if client.formerCall != nil {
+			client.formerCall(serviceName, methodName, state)
+		}
 		// 发送关闭请求
 		if client.status != closeStatus {
 			client.mutex.Lock()
-			client.client.WriteJSON(closeRequest)
+			if client.status == sussesStatus || client.client != nil {
+				client.client.WriteJSON(closeRequest)
+			}
 			client.mutex.Unlock()
 		}
 
@@ -394,12 +426,7 @@ func networkError[T any](c *Client, serviceName, methodName string) Result[T] {
 		Msg:    "fun: Network anomaly",
 		Status: NetworkError,
 	})
-
-	var data T
 	return Result[T]{
-		Id:     result.Id,
-		Code:   result.Code,
-		Data:   data,
 		Msg:    result.Msg,
 		Status: result.Status,
 	}
@@ -413,11 +440,7 @@ func timeoutError[T any](c *Client, serviceName, methodName string) Result[T] {
 		Status: TimeoutError,
 	})
 
-	var data T
 	return Result[T]{
-		Id:     result.Id,
-		Code:   result.Code,
-		Data:   data,
 		Msg:    result.Msg,
 		Status: result.Status,
 	}
@@ -433,4 +456,35 @@ func (c *Client) after(serviceName, methodName string, result Result[any]) Resul
 
 	// 否则直接返回原始结果
 	return result
+}
+
+func SafeConvert[T any](data any) (result T) {
+	defer func() {
+		if r := recover(); r != nil {
+			result = *new(T)
+		}
+	}()
+
+	// 直接类型断言
+	if typedData, typeOk := data.(T); typeOk {
+		return typedData
+	}
+
+	if data == nil {
+		return *new(T)
+	}
+
+	// 尝试通过JSON进行转换
+	jsonData, err := json.Marshal(data)
+	if err != nil {
+		return *new(T)
+	}
+
+	var converted T
+	err = json.Unmarshal(jsonData, &converted)
+	if err != nil {
+		return *new(T)
+	}
+
+	return converted
 }
