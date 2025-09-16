@@ -54,7 +54,7 @@ type RequestInfo struct {
 	Dto         any
 	State       map[string]string
 	Type        RequestType
-	function    *func(data Result[any])
+	Chan        chan Result[any]
 	on          *On[any]
 }
 
@@ -161,9 +161,9 @@ func (c *Client) initConnection(url string, wg *sync.WaitGroup) {
 	c.requestList.Range(func(key, value interface{}) bool {
 		request := value.(RequestInfo)
 		if request.Type == funcType {
-			if request.function != nil {
+			if request.Chan != nil {
 				result := networkError[any](c, request.ServiceName, request.MethodName)
-				(*request.function)(result)
+				request.Chan <- result
 			}
 		} else {
 			if request.on != nil && request.on.Close != nil {
@@ -195,7 +195,10 @@ func (c *Client) handleMessage(result Result[any]) {
 				c.requestList.Delete(result.Id)
 			}
 		} else {
-			(*request.function)(result)
+			if request.Chan != nil {
+				result := c.after(request.ServiceName, request.MethodName, result)
+				request.Chan <- result
+			}
 			c.requestList.Delete(result.Id)
 		}
 	}
@@ -268,7 +271,7 @@ func (c *Client) isRequestId(id string) bool {
 }
 
 func Request[T any](client *Client, serviceName string, methodName string, dto ...any) Result[T] {
-	resultChan := make(chan Result[T], 1)
+	resultChan := make(chan Result[any], 1)
 	id, _ := gonanoid.New()
 	state := make(map[string]string)
 	if client.formerCall != nil {
@@ -284,24 +287,8 @@ func Request[T any](client *Client, serviceName string, methodName string, dto .
 	if len(dto) > 0 {
 		requestInfo.Dto = &dto[0]
 	}
-	var result Result[T]
-	function := func(data Result[any]) {
-		if client.isRequestId(id) {
-			if client.afterCall != nil {
-				data = client.afterCall(serviceName, methodName, data)
-			}
-			convertedData := SafeConvert[T](data.Data)
-			result = Result[T]{
-				Id:     data.Id,
-				Code:   data.Code,
-				Data:   convertedData,
-				Msg:    data.Msg,
-				Status: data.Status,
-			}
-			resultChan <- result
-		}
-	}
-	requestInfo.function = &function
+	var result Result[any]
+	requestInfo.Chan = resultChan
 	if client.status != closeStatus {
 		client.mutex.Lock()
 		if client.status == sussesStatus || client.client != nil {
@@ -330,11 +317,20 @@ func Request[T any](client *Client, serviceName string, methodName string, dto .
 				return timeoutError[T](client, serviceName, methodName)
 			}
 		case result = <-resultChan:
-			// 正常收到结果，移除请求并返回结果
 			if client.isRequestId(id) {
 				client.removeRequest(id)
+				if client.afterCall != nil {
+					result = client.afterCall(serviceName, methodName, result)
+				}
+				convertedData := SafeConvert[T](result.Data)
+				return Result[T]{
+					Id:     result.Id,
+					Code:   result.Code,
+					Data:   convertedData,
+					Msg:    result.Msg,
+					Status: result.Status,
+				}
 			}
-			return result
 		}
 	}
 }
