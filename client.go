@@ -1,34 +1,24 @@
-package fun
+package client
 
 import (
 	"fmt"
-	"io/ioutil"
 	"os"
 	"sync"
 	"time"
 
+	"context"
 	"github.com/gorilla/websocket"
 	gonanoid "github.com/matoous/go-nanoid/v2"
 )
 
 // Result 定义结果结构体
-
 // RequestType 定义请求类型枚举
-type RequestType int
+type RequestType uint8
 
 const (
-	FuncType RequestType = iota
-	ProxyType
-	CloseType
-)
-
-const (
-	successCode = iota
-	cellErrorCode
-	errorCode
-	closeErrorCode
-	networkError
-	timeoutErro
+	funcType RequestType = iota
+	proxyType
+	closeType
 )
 
 type Result[T any] struct {
@@ -36,28 +26,38 @@ type Result[T any] struct {
 	Code   *uint16
 	Data   T
 	Msg    string
-	Status uint8
+	Status ResultCode
 }
 
-type on[T any] struct {
+type ResultCode uint8
+
+const (
+	SuccessCode ResultCode = iota
+	CellErrorCode
+	ErrorCode
+	closeErrorCode
+	NetworkError
+	TimeoutError
+)
+
+type On[T any] struct {
 	Message func(message T)
 	Close   func()
 }
 
+// RequestInfo 定义请求信息结构体
 type RequestInfo[T any] struct {
 	Id          string
 	MethodName  string
 	ServiceName string
-	Dto         *T
+	Dto         *any
 	State       map[string]string
 	Type        RequestType
 	function    *func(data Result[T])
-	on          *on[T]
+	on          *On[T]
 }
 
 type Void struct{}
-
-// RequestInfo 定义请求信息结构体
 
 // Client 定义客户端结构体
 type Client struct {
@@ -71,6 +71,7 @@ type Client struct {
 	mutex       sync.Mutex
 	client      *websocket.Conn
 	timer       *time.Timer
+	ticker      *time.Ticker
 }
 
 type status int
@@ -88,14 +89,14 @@ func NewClient(url string) *Client {
 		openCall:    make([]func(), 0),
 		closeCall:   make([]func(), 0),
 	}
-
 	// 模拟连接初始化
-	go client.initConnection(url)
-
+	go func() {
+		for {
+			client.initConnection(url)
+		}
+	}()
 	return client
 }
-
-
 
 // 模拟初始化连接
 func (c *Client) initConnection(url string) {
@@ -106,43 +107,78 @@ func (c *Client) initConnection(url string) {
 		time.Sleep(5 * time.Second)
 		conn, _, err = websocket.DefaultDialer.Dial(url, nil)
 	}
-	c.client =  conn
-	go func() {
-		for {
-			writeMutex.Lock() // 加锁
-			err = conn.WriteMessage(websocket.BinaryMessage, []byte{0})
-			writeMutex.Unlock()
-			time.Sleep(5 * time.Second)
-		}
-	}()
-	go func() {
-		for {
-			messageType, message, _ := conn.ReadMessage()
-			if messageType == websocket.TextMessage {
-				testMessageQueue <- message
-			}
-			if messageType == websocket.BinaryMessage {
-				//处理客户端ping信息 回复
-				if len(*message) == 1 && (*message)[0] == 1 {
-					c.timer.Stop()
-				}
-				return
-			}
-		}
-	}()
-	c.status = susses
-
+	c.client = conn
+	c.status = sussesStatus
+	// 启动 ping 机制
+	ctx, cancelFunc := context.WithCancel(context.Background())
+	c.ping(ctx)
 	// 触发打开回调
 	for _, callback := range c.openCall {
 		callback()
 	}
+	for _, request := range c.requestList {
+		c.client.WriteJSON(request)
+		//发送信息
+	}
+	// 消息处理循环
+	for {
+		messageType, message, err := conn.ReadMessage()
+		if err != nil {
+			break
+		}
+
+		if messageType == websocket.TextMessage {
+			// 处理文u哦
+			// testMessageQueue <- message (需要定义 testMessageQueue)
+		}
+
+		if messageType == websocket.BinaryMessage {
+			if len(message) == 1 && message[0] == 1 {
+				if c.timer != nil {
+					c.timer.Stop()
+				}
+			}
+		}
+	}
+	c.status = closeStatus
+	cancelFunc()
+	c.ticker.Stop()
+	c.client.Close()
+	for _, request := range c.requestList {
+		if request.Type == funcType {
+			if request.function != nil {
+				result := c.networkError(request.ServiceName, request.MethodName)
+				(*request.function)(result)
+			}
+		} else {
+			if request.on != nil && request.on.Close != nil {
+				request.on.Close()
+			}
+		}
+	}
+	c.requestList = make([]RequestInfo[any], 0)
+	for _, closeCall := range c.closeCall {
+		closeCall()
+	}
 }
 
-func (c *Client) ping(){
-	err := c.client.WriteMessage(websocket.BinaryMessage, []byte{0})
-	c.timer = time.AfterFunc(2*time.Second, func() {
-	})
-
+func (c *Client) ping(ctx context.Context) {
+	go func() {
+		ticker := time.NewTicker(5 * time.Second)
+		c.ticker = ticker
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				c.client.WriteMessage(websocket.BinaryMessage, []byte{0})
+				c.timer = time.AfterFunc(2*time.Second, func() {
+					c.client.Close()
+				})
+			}
+		}
+	}()
 }
 
 // OnFormer 设置请求前回调
@@ -179,32 +215,36 @@ func (c *Client) removeRequest(id string) {
 	c.requestList = filtered
 }
 
-func request[T]() Result[T]  {
-
+func request[T any](serviceName string, methodName string, dto any) Result[T] {
+	return Result[T]{
+		Id:     "",
+		Msg:    "fun: Network anomaly",
+		Status: NetworkError,
+		Data:   Void{},
+	}
 }
 
-
-func Proxy[T]() func  {
-
+func Proxy[T any](serviceName string, methodName string, dto any, on *On[T]) func() {
+	return func() {}
 }
 
 func getId() string {
-    const idFile = "client_id.txt"
-    var id string
-    if data, err := os.ReadFile(idFile); err == nil && len(data) > 0 {
-        id = string(data)
-    } else {
-        id, _ = gonanoid.New()
-        os.WriteFile(idFile, []byte(id), 0644)
-    }
-    return id
+	const idFile = "client_id.txt"
+	var id string
+	if data, err := os.ReadFile(idFile); err == nil && len(data) > 0 {
+		id = string(data)
+	} else {
+		id, _ = gonanoid.New()
+		os.WriteFile(idFile, []byte(id), 0644)
+	}
+	return id
 }
 
 func (c *Client) networkError(serviceName, methodName string) Result[any] {
 	return c.after(serviceName, methodName, Result[any]{
 		Id:     "",
 		Msg:    "fun: Network anomaly",
-		Status: networkError,
+		Status: NetworkError,
 		Data:   nil,
 	})
 }
@@ -214,7 +254,7 @@ func (c *Client) timeoutError(serviceName, methodName string) Result[any] {
 	return c.after(serviceName, methodName, Result[any]{
 		Id:     "",
 		Msg:    "fun: Network timeout",
-		Status: timeoutErro,
+		Status: TimeoutError,
 		Data:   nil,
 	})
 }
