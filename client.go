@@ -156,10 +156,8 @@ func (c *Client) initConnection(url string) {
 	c.requestList.Range(func(key, value interface{}) bool {
 		request := value.(RequestInfo)
 		if request.Type == funcType {
-			if request.Chan != nil {
-				result := networkError[any](c, request.ServiceName, request.MethodName)
-				request.Chan <- result
-			}
+			result := networkError[any](c, request.ServiceName, request.MethodName)
+			request.Chan <- result
 		} else {
 			if request.on != nil && request.on.Close != nil {
 				request.on.Close()
@@ -190,10 +188,8 @@ func (c *Client) handleMessage(result Result[any]) {
 				c.requestList.Delete(result.Id)
 			}
 		} else {
-			if request.Chan != nil {
-				result := c.after(request.ServiceName, request.MethodName, result)
-				request.Chan <- result
-			}
+			result := c.after(request.ServiceName, request.MethodName, result)
+			request.Chan <- result
 			c.requestList.Delete(result.Id)
 		}
 	}
