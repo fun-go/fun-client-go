@@ -317,7 +317,7 @@ func Request[T any](client *Client, serviceName string, methodName string, dto .
 				if client.afterCall != nil {
 					result = client.afterCall(serviceName, methodName, result)
 				}
-				convertedData := SafeConvert[T](result.Data)
+				convertedData := safeConvert[T](result.Data)
 				return Result[T]{
 					Id:     result.Id,
 					Code:   result.Code,
@@ -349,7 +349,7 @@ func Proxy[T any](client *Client, serviceName string, methodName string, dto any
 	onAny := &On[any]{
 		Message: func(message any) {
 			// 类型断言转换为 T 类型
-			convertedData := SafeConvert[T](message)
+			convertedData := safeConvert[T](message)
 			on.Message(convertedData)
 		},
 		Close: on.Close,
@@ -449,7 +449,7 @@ func (c *Client) after(serviceName, methodName string, result Result[any]) Resul
 	return result
 }
 
-func SafeConvert[T any](data any) (result T) {
+func safeConvert[T any](data any) (result T) {
 	defer func() {
 		if r := recover(); r != nil {
 			result = *new(T)
