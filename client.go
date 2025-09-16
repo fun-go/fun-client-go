@@ -94,27 +94,22 @@ func NewClient(url string) (*Client, error) {
 		return nil, err
 	}
 	url = fmt.Sprintf("%s?id=%s", url, id)
-	// 模拟连接初始化
-	var wg sync.WaitGroup
-	wg.Add(1)
 	go func() {
 		for {
-			client.initConnection(url, &wg)
+			client.initConnection(url)
 		}
 	}()
-	wg.Wait()
 	return client, nil
 }
 
 // 模拟初始化连接
-func (c *Client) initConnection(url string, wg *sync.WaitGroup) {
+func (c *Client) initConnection(url string) {
 	// 模拟连接过程
 	conn, _, err := websocket.DefaultDialer.Dial(url, nil)
 	for err != nil {
 		time.Sleep(5 * time.Second)
 		conn, _, err = websocket.DefaultDialer.Dial(url, nil)
 	}
-	wg.Done()
 	c.client = conn
 	c.status = sussesStatus
 	// 启动 ping 机制
