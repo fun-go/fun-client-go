@@ -104,12 +104,12 @@ func NewClient(url string) (*Client, error) {
 // 模拟初始化连接
 func (c *Client) initConnection(url string) {
 	// 模拟连接过程
-	c.mutex.Lock()
 	conn, _, err := websocket.DefaultDialer.Dial(url, nil)
 	for err != nil {
 		time.Sleep(5 * time.Second)
 		conn, _, err = websocket.DefaultDialer.Dial(url, nil)
 	}
+	c.mutex.Lock()
 	c.client = conn
 	c.status = sussesStatus
 	c.mutex.Unlock()
