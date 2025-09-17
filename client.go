@@ -52,7 +52,7 @@ type RequestInfo struct {
 	ServiceName string
 	Dto         any
 	State       map[string]string
-	requestType RequestType
+	Type        RequestType
 	result      chan Result[any]
 	on          On[any]
 }
@@ -160,7 +160,7 @@ func (c *Client) initConnection(url string) {
 	cancelFunc()
 	c.requestList.Range(func(key, value interface{}) bool {
 		request := value.(RequestInfo)
-		if request.requestType == funcType {
+		if request.Type == funcType {
 			result := networkError[any](c, request.ServiceName, request.MethodName)
 			request.result <- result
 		} else {
@@ -181,7 +181,7 @@ func (c *Client) handleMessage(result Result[any]) {
 	// 使用sync.Map优化查找性能
 	if value, exists := c.requestList.Load(result.Id); exists {
 		request := value.(RequestInfo)
-		if request.requestType == proxyType {
+		if request.Type == proxyType {
 			if result.Status == SuccessCode {
 				if request.on.Message != nil {
 					request.on.Message(result.Data)
@@ -279,7 +279,7 @@ func Request[T any](client *Client, serviceName string, methodName string, dto .
 		MethodName:  methodName,
 		ServiceName: serviceName,
 		State:       state,
-		requestType: funcType,
+		Type:        funcType,
 	}
 	if len(dto) > 0 {
 		requestInfo.Dto = &dto[0]
@@ -349,7 +349,7 @@ func Proxy[T any](client *Client, serviceName string, methodName string, dto any
 		MethodName:  methodName,
 		ServiceName: serviceName,
 		State:       state,
-		requestType: proxyType,
+		Type:        proxyType,
 	}
 
 	if dto != nil {
