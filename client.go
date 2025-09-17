@@ -104,12 +104,12 @@ func NewClient(url string) (*Client, error) {
 // 模拟初始化连接
 func (c *Client) initConnection(url string) {
 	// 模拟连接过程
+	c.mutex.Lock()
 	conn, _, err := websocket.DefaultDialer.Dial(url, nil)
 	for err != nil {
 		time.Sleep(5 * time.Second)
 		conn, _, err = websocket.DefaultDialer.Dial(url, nil)
 	}
-	c.mutex.Lock()
 	c.client = conn
 	c.status = sussesStatus
 	c.mutex.Unlock()
@@ -117,9 +117,11 @@ func (c *Client) initConnection(url string) {
 	ctx, cancelFunc := context.WithCancel(context.Background())
 	c.ping(ctx)
 	// 触发打开回调
+	c.mutex.Lock()
 	for _, callback := range c.openCall {
 		callback()
 	}
+	c.mutex.Unlock()
 	c.requestList.Range(func(key, value interface{}) bool {
 		request := value.(RequestInfo)
 		if c.status == sussesStatus || conn != nil {
@@ -267,9 +269,11 @@ func Request[T any](client *Client, serviceName string, methodName string, dto .
 	resultChan := make(chan Result[any], 1)
 	id, _ := gonanoid.New()
 	state := make(map[string]string)
+	client.mutex.Lock()
 	if client.formerCall != nil {
 		client.formerCall(serviceName, methodName, state)
 	}
+	client.mutex.Unlock()
 	requestInfo := RequestInfo{
 		Id:          id,
 		MethodName:  methodName,
@@ -282,13 +286,13 @@ func Request[T any](client *Client, serviceName string, methodName string, dto .
 	}
 	var result Result[any]
 	requestInfo.Chan = resultChan
+	client.mutex.Lock()
 	if client.status != closeStatus {
-		client.mutex.Lock()
 		if client.status == sussesStatus || client.client != nil {
 			client.client.WriteJSON(requestInfo)
 		}
-		client.mutex.Unlock()
 	}
+	client.mutex.Unlock()
 	// 使用sync.Map的Store操作
 	client.requestList.Store(requestInfo.Id, requestInfo)
 
@@ -299,10 +303,12 @@ func Request[T any](client *Client, serviceName string, methodName string, dto .
 		select {
 		case <-networkTimeout:
 			// 网络超时处理
+			client.mutex.Lock()
 			if client.status == closeStatus && client.isRequestId(id) {
 				client.removeRequest(id)
 				return networkError[T](client, serviceName, methodName)
 			}
+			client.mutex.Unlock()
 		case <-timeout:
 			// 请求超时处理
 			if client.isRequestId(id) {
@@ -312,9 +318,11 @@ func Request[T any](client *Client, serviceName string, methodName string, dto .
 		case result = <-resultChan:
 			if client.isRequestId(id) {
 				client.removeRequest(id)
+				client.mutex.Lock()
 				if client.afterCall != nil {
 					result = client.afterCall(serviceName, methodName, result)
 				}
+				client.mutex.Unlock()
 				convertedData := safeConvert[T](result.Data)
 				return Result[T]{
 					Id:     result.Id,
@@ -331,9 +339,11 @@ func Request[T any](client *Client, serviceName string, methodName string, dto .
 func Proxy[T any](client *Client, serviceName string, methodName string, dto any, on On[T]) func() {
 	id, _ := gonanoid.New()
 	state := make(map[string]string)
+	client.mutex.Lock()
 	if client.formerCall != nil {
 		client.formerCall(serviceName, methodName, state)
 	}
+	client.mutex.Unlock()
 	requestInfo := RequestInfo{
 		Id:          id,
 		MethodName:  methodName,
@@ -355,14 +365,14 @@ func Proxy[T any](client *Client, serviceName string, methodName string, dto any
 	requestInfo.on = onAny
 
 	// 如果客户端已连接，则发送请求
+	client.mutex.Lock()
 	if client.status != closeStatus {
-		client.mutex.Lock()
 		if client.status == sussesStatus || client.client != nil {
 			client.client.WriteJSON(requestInfo)
 		}
-		client.mutex.Unlock()
-	}
 
+	}
+	client.mutex.Unlock()
 	// 将请求添加到请求列表中
 	// 使用sync.Map的Store操作
 	client.requestList.Store(requestInfo.Id, requestInfo)
@@ -377,18 +387,17 @@ func Proxy[T any](client *Client, serviceName string, methodName string, dto any
 			MethodName:  methodName,
 		}
 		state = make(map[string]string)
+		client.mutex.Lock()
 		if client.formerCall != nil {
 			client.formerCall(serviceName, methodName, state)
 		}
 		// 发送关闭请求
 		if client.status != closeStatus {
-			client.mutex.Lock()
 			if client.status == sussesStatus || client.client != nil {
 				client.client.WriteJSON(closeRequest)
 			}
-			client.mutex.Unlock()
 		}
-
+		client.mutex.Unlock()
 		// 从请求列表中移除该请求
 		client.removeRequest(id)
 	}
