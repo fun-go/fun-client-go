@@ -52,8 +52,8 @@ type RequestInfo struct {
 	ServiceName string
 	Dto         any
 	State       map[string]string
-	Type        RequestType
-	Chan        chan Result[any]
+	requestType RequestType
+	result      chan Result[any]
 	on          On[any]
 }
 
@@ -160,9 +160,9 @@ func (c *Client) initConnection(url string) {
 	cancelFunc()
 	c.requestList.Range(func(key, value interface{}) bool {
 		request := value.(RequestInfo)
-		if request.Type == funcType {
+		if request.requestType == funcType {
 			result := networkError[any](c, request.ServiceName, request.MethodName)
-			request.Chan <- result
+			request.result <- result
 		} else {
 			if request.on.Close != nil {
 				request.on.Close()
@@ -181,7 +181,7 @@ func (c *Client) handleMessage(result Result[any]) {
 	// 使用sync.Map优化查找性能
 	if value, exists := c.requestList.Load(result.Id); exists {
 		request := value.(RequestInfo)
-		if request.Type == proxyType {
+		if request.requestType == proxyType {
 			if result.Status == SuccessCode {
 				if request.on.Message != nil {
 					request.on.Message(result.Data)
@@ -194,7 +194,7 @@ func (c *Client) handleMessage(result Result[any]) {
 			}
 		} else {
 			result := c.after(request.ServiceName, request.MethodName, result)
-			request.Chan <- result
+			request.result <- result
 		}
 	}
 }
@@ -279,13 +279,13 @@ func Request[T any](client *Client, serviceName string, methodName string, dto .
 		MethodName:  methodName,
 		ServiceName: serviceName,
 		State:       state,
-		Type:        funcType,
+		requestType: funcType,
 	}
 	if len(dto) > 0 {
 		requestInfo.Dto = &dto[0]
 	}
 	var result Result[any]
-	requestInfo.Chan = resultChan
+	requestInfo.result = resultChan
 	client.mutex.Lock()
 	if client.status != closeStatus {
 		if client.status == sussesStatus || client.client != nil {
@@ -348,9 +348,12 @@ func Proxy[T any](client *Client, serviceName string, methodName string, dto any
 		Id:          id,
 		MethodName:  methodName,
 		ServiceName: serviceName,
-		Dto:         &dto,
 		State:       state,
-		Type:        proxyType,
+		requestType: proxyType,
+	}
+
+	if dto != nil {
+		requestInfo.Dto = dto
 	}
 
 	// 创建 On[any] 类型的包装
@@ -382,7 +385,7 @@ func Proxy[T any](client *Client, serviceName string, methodName string, dto any
 		// 创建关闭请求
 		closeRequest := RequestInfo{
 			Id:          id,
-			Type:        closeType,
+			requestType: closeType,
 			ServiceName: serviceName,
 			MethodName:  methodName,
 		}
