@@ -385,7 +385,7 @@ func Proxy[T any](client *Client, serviceName string, methodName string, dto any
 		// 创建关闭请求
 		closeRequest := RequestInfo{
 			Id:          id,
-			requestType: closeType,
+			Type:        closeType,
 			ServiceName: serviceName,
 			MethodName:  methodName,
 		}
